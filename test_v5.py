@@ -177,9 +177,40 @@ def test_parity_csv():
     print(f"paridad CSV OK ({len(ents)} entradas, lectura de la exportación de TradingView y comparación)")
 
 
+def test_diagnostic():
+    import main
+    from types import SimpleNamespace
+    bot = main.Bot.__new__(main.Bot)
+    bot.ex = SimpleNamespace(contracts={"T-USDT": {"tick": 0.0001}})
+    bot.symbols = ["T-USDT"]
+    bot.universe_note = "prueba"
+    tf = C.TIMEFRAMES[0]
+    eng = WyckoffEngine(C.tf_seconds(tf), 0.0001, "Agresivo", keep_bars=400)
+    for r in synth(1, cycles=8):
+        d = eng.update(*r)
+        bot.tally("T-USDT", eng, d)
+    bot.engines = {("T-USDT", tf): eng}
+    txt = bot.diagnostic_text()
+    assert "Embudo" in txt and "Entradas del motor" in txt, txt
+    h = eng.hist
+    assert h["bars"] > 1000 and h["climax"] >= 1 and h["entries"] >= 1, h
+    # universo vacío → advierte
+    bot.symbols = []
+    assert "Universo casi vacío" in bot.diagnostic_text()
+    # sin nada de nada → diagnostica "ni un clímax"
+    eng2 = WyckoffEngine(C.tf_seconds(tf), 0.0001, "Agresivo", keep_bars=400)
+    flat = [[i * 900_000, 100.0, 100.1, 99.9, 100.0, 10.0] for i in range(400)]
+    for r in flat:
+        bot.tally("T-USDT", eng2, eng2.update(*r))
+    bot.engines = {("T-USDT", tf): eng2}
+    bot.symbols = ["A", "B", "C", "D", "E"]
+    assert "Ni un clímax" in bot.diagnostic_text()
+    print("diagnóstico OK (embudo, universo vacío, sin clímax)")
+
+
 if __name__ == "__main__":
     os.environ.setdefault("DATA_DIR", tempfile.mkdtemp())
     for fn in (test_walk_book, test_replace_stop, test_book_guard, test_cache_roundtrip, test_portfolio,
-               test_montecarlo, test_parity_csv):
+               test_montecarlo, test_parity_csv, test_diagnostic):
         fn()
     print("\nTODO OK")
