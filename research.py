@@ -138,7 +138,7 @@ def run():
     syms = [s.strip().upper() for s in env("RESEARCH_SYMBOLS", DEFAULT_SYMBOLS).split(",") if s.strip()]
     tf = env("RESEARCH_TF", C.TIMEFRAME)
     days = env("RESEARCH_DAYS", "365")
-    steps = [s.strip().lower() for s in env("RESEARCH_STEPS", "backtest,config,entradas,salidas,meta").split(",")]
+    steps = [s.strip().lower() for s in env("RESEARCH_STEPS", "backtest,entradas,salidas,edge,meta").split(",")]
     strict = env("RESEARCH_STRICT", C.ENTRY_STRICTNESS)
     sig = hashlib.md5(f"{C.CODE_VERSION}|{syms}|{tf}|{days}|{steps}|{strict}".encode()).hexdigest()[:10]
     marker = os.path.join(C.DATA_DIR, f"research_done_{sig}")
@@ -172,17 +172,15 @@ def run():
     t0 = time.time()
 
     plan = {
-        # diagnóstico: filtros en "aviso" para que los desgloses vean TODAS las señales del indicador
-        "backtest": ("BACKTEST (todas las señales, filtros en aviso)", B.main,
+        "backtest": ("BACKTEST (configuración actual)", B.main,
                      ["backtest", "--symbols", sym_arg, "--tf", tf, "--days", days, "--strict", strict,
-                      "--source", source, "--trend", "aviso", "--zone-filter", "aviso", "--obstacle-min-r", "0"]),
-        "config": ("BACKTEST (configuración del bot)", B.main,
-                   ["backtest", "--symbols", sym_arg, "--tf", tf, "--days", days, "--strict", strict,
-                    "--source", source]),
+                      "--source", source]),
         "entradas": ("SWEEP ENTRADAS", sweep.main,
                      ["sweep", "--modo", "entradas", "--symbols", sym_arg, "--tf", tf, "--days", days]),
         "salidas": ("SWEEP SALIDAS", sweep.main,
                     ["sweep", "--modo", "salidas", "--symbols", sym_arg, "--tf", tf, "--days", days]),
+        "edge": ("SWEEP EDGE (ideas v5.2)", sweep.main,
+                 ["sweep", "--modo", "edge", "--symbols", sym_arg, "--tf", tf, "--days", days]),
         "meta": ("META-ETIQUETADO", meta.main,
                  ["meta", "--symbols", sym_arg, "--tf", tf, "--days", days, "--incluir-trampas", "--guardar-si-pasa"]),
     }

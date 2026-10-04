@@ -1,4 +1,6 @@
 data/
+cache/
 __pycache__/
 *.pyc
 .env
+meta_model.json

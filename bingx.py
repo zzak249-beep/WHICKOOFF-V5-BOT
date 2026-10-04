@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 
 import requests
 
+import config as C
 from universe import classify, pretty
 
 log = logging.getLogger("bingx")
@@ -23,19 +24,6 @@ log = logging.getLogger("bingx")
 
 class BingXError(Exception):
     pass
-
-
-def walk_book(levels, qty):
-    """Precio medio al que se llena `qty` recorriendo niveles [(precio, cantidad)] de mejor a peor.
-    None si los niveles no alcanzan para llenarla (libro demasiado fino)."""
-    left, cost = qty, 0.0
-    for px, q in levels:
-        take = min(left, q)
-        cost += take * px
-        left -= take
-        if left <= 1e-12:
-            return cost / qty
-    return None
 
 
 class BingX:
@@ -48,16 +36,25 @@ class BingX:
         self._hedge = None
         self._lock = threading.Lock()
         self._next_slot = 0.0
-        self.min_interval = 1.0 / max(float(os.getenv("BINGX_MAX_RPS", "15")), 1.0)
+        # v5.3: dos grupos independientes, como los de BingX: datos de mercado (500/10 s por IP) y cuenta/órdenes (5-10/s)
+        self.interval = {False: 1.0 / max(C.BINGX_MAX_RPS, 1.0), True: 1.0 / max(C.BINGX_TRADE_RPS, 0.5)}
+        self._slot = {False: 0.0, True: 0.0}
+        self._penalty_until = 0.0
 
-    def _throttle(self):
-        """Limita las peticiones por segundo entre todos los hilos (cientos de símbolos por vela)."""
+    def _throttle(self, signed=False):
+        """Limita las peticiones por segundo entre todos los hilos, por grupo, y respeta una penalización global."""
         with self._lock:
             now = time.monotonic()
-            wait = self._next_slot - now
-            self._next_slot = max(now, self._next_slot) + self.min_interval
+            start = max(self._slot[signed], self._penalty_until, now)
+            self._slot[signed] = start + self.interval[signed]
+        wait = start - now
         if wait > 0:
             time.sleep(wait)
+
+    def _penalize(self, secs):
+        """Tras un rate limit, TODOS los hilos esperan: reintentar en paralelo lo empeora."""
+        with self._lock:
+            self._penalty_until = max(self._penalty_until, time.monotonic() + secs)
 
     # ── núcleo ──
     def _req(self, method, path, params=None, signed=False, retries=3):
@@ -72,13 +69,18 @@ class BingX:
                 sig = hmac.new(self.secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
                 qs = f"{qs}&signature={sig}" if qs else f"signature={sig}"
             url = self.base + path
-            self._throttle()
+            self._throttle(signed)
             try:
                 if method == "POST":
                     r = self.http.post(url, data=qs, timeout=15,
                                        headers={"Content-Type": "application/x-www-form-urlencoded"})
                 else:
                     r = self.http.request(method, f"{url}?{qs}" if qs else url, timeout=15)
+                if r.status_code == 429:  # rechazada por límite: no se ejecutó, es seguro esperar y reintentar
+                    self._penalize(3 * (attempt + 1))
+                    if attempt < retries - 1:
+                        continue
+                    raise BingXError(f"{path}: límite de peticiones (HTTP 429)")
                 j = r.json()
             except (requests.RequestException, ValueError) as e:
                 # un POST que se queda sin respuesta puede haberse ejecutado: reintentarlo a ciegas duplicaría
@@ -91,7 +93,7 @@ class BingX:
             if code in (0, "0"):
                 return j.get("data")
             if code in (100410, 109400) and attempt < retries - 1:  # rate limit / sobrecarga
-                time.sleep(2 * (attempt + 1))
+                self._penalize(2 * (attempt + 1))
                 continue
             raise BingXError(f"{path} code={code} msg={j.get('msg')}")
         raise BingXError(f"{path}: sin respuesta")
@@ -124,24 +126,6 @@ class BingX:
     def price(self, symbol):
         d = self._req("GET", "/openApi/swap/v2/quote/price", {"symbol": symbol})
         return float(d["price"])
-
-    def depth(self, symbol, limit=20):
-        """Libro: (bids de mejor a peor, asks de mejor a peor), cada nivel (precio, cantidad)."""
-        d = self._req("GET", "/openApi/swap/v2/quote/depth", {"symbol": symbol, "limit": limit}) or {}
-
-        def lv(rows):
-            out = []
-            for r in rows or []:
-                try:
-                    if isinstance(r, dict):
-                        out.append((float(r["price"]), float(r.get("quantity", r.get("qty", 0)))))
-                    else:
-                        out.append((float(r[0]), float(r[1])))
-                except (KeyError, ValueError, IndexError, TypeError):
-                    continue
-            return out
-
-        return sorted(lv(d.get("bids")), key=lambda x: -x[0]), sorted(lv(d.get("asks")), key=lambda x: x[0])
 
     def funding_rate(self, symbol):
         d = self._req("GET", "/openApi/swap/v2/quote/premiumIndex", {"symbol": symbol})
